@@ -1,0 +1,11 @@
+chromadb
+faiss-cpu
+langchain>=0.3
+langchain-chroma
+langchain-community
+langchain-ollama
+pymupdf
+ragas>=0.2
+rank-bm25
+sentence-transformers
+torch

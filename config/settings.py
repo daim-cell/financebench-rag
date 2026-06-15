@@ -37,3 +37,8 @@ RRF_K = 60
 # Evaluation
 EVAL_PAIRS_PATH = EVAL_DIR / "qa_pairs_30.json"
 COMPARISON_TABLE = EVAL_DIR / "comparison_table.csv"
+EVAL_SAMPLE_SIZE = 30
+RANDOM_SEED      = 42
+ 
+# Dataset
+HF_DATASET_ID = "PatronusAI/financebench"

@@ -1,11 +1,36 @@
-chromadb
-faiss-cpu
-langchain>=0.3
-langchain-chroma
-langchain-community
-langchain-ollama
-pymupdf
-ragas>=0.2
-rank-bm25
-sentence-transformers
-torch
+# Core RAG framework
+langchain>=0.3.0
+langchain-community>=0.3.0
+langchain-chroma>=0.1.0
+langchain-ollama>=0.2.0
+langchain-huggingface>=0.1.0
+
+# ML / embeddings
+torch>=2.3.0
+sentence-transformers>=3.0.0
+transformers>=4.40.0
+tiktoken>=0.7.0
+
+# Vector stores
+chromadb>=0.5.0
+faiss-cpu>=1.8.0
+
+# Sparse retrieval
+rank-bm25>=0.2.2
+
+# PDF processing
+pymupdf>=1.24.0
+
+# Dataset download
+datasets>=2.20.0
+huggingface-hub>=0.23.0
+
+# Evaluation
+ragas>=0.2.0
+
+# Utilities
+tqdm>=4.66.0
+pandas>=2.0.0
+numpy>=1.24.0
+requests>=2.31.0
+python-dotenv>=1.0.0

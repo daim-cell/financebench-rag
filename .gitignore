@@ -34,3 +34,7 @@ eval/comparison_table.csv
 .DS_Store
 .idea/
 .vscode/
+
+
+# OS
+.DS_Store

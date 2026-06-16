@@ -39,6 +39,7 @@ EVAL_PAIRS_PATH = EVAL_DIR / "qa_pairs_30.json"
 COMPARISON_TABLE = EVAL_DIR / "comparison_table.csv"
 EVAL_SAMPLE_SIZE = 30
 RANDOM_SEED      = 42
+SIMILARITY_THRESHOLD = 0.7   # answer_accuracy = 1 if answer_similarity >= this
  
 # Dataset
 HF_DATASET_ID = "PatronusAI/financebench"

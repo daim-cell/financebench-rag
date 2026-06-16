@@ -16,16 +16,7 @@ data/raw/pdfs/*
 !data/raw/pdfs/.gitkeep
 data/processed/*
 !data/processed/.gitkeep
-vectorstores/*
-!vectorstores/.gitkeep
-!vectorstores/fixed_size/
-!vectorstores/fixed_size/.gitkeep
-!vectorstores/recursive/
-!vectorstores/recursive/.gitkeep
-!vectorstores/semantic/
-!vectorstores/semantic/.gitkeep
-!vectorstores/parent_document/
-!vectorstores/parent_document/.gitkeep
+vectorstores/
 eval/results/*
 !eval/results/.gitkeep
 eval/comparison_table.csv

@@ -1,4 +1,4 @@
-
+# This does not work cannot amke this work too
 import logging
 
 from langchain_core.documents import Document
@@ -9,7 +9,7 @@ from src.retrieval.dense import get_embedder
 log = logging.getLogger(__name__)
 
 
-def chunk_documents(docs: list[dict]) -> list[Document]:
+def chunk_documents(docs: list[dict], embedder=None) -> list[Document]:
     """
     Chunk processed documents on semantic breakpoints.
 
@@ -17,7 +17,8 @@ def chunk_documents(docs: list[dict]) -> list[Document]:
     stays accurate (the chunker would otherwise merge text across page bounds).
 
     Args:
-        docs: list of dicts from load_processed_docs().
+        docs:     list of dicts loaded from load_processed_docs().
+        embedder: optional pre-built embedder; one is created if not supplied.
 
     Returns:
         list of Documents with metadata {doc_name, page_num, chunk_id}.
@@ -30,7 +31,8 @@ def chunk_documents(docs: list[dict]) -> list[Document]:
             "Run: pip install langchain-experimental"
         ) from exc
 
-    embedder = get_embedder()  # MPS embedder, normalized
+    if embedder is None:
+        embedder = get_embedder()
     chunker = SemanticChunker(
         embeddings=embedder,
         breakpoint_threshold_type="percentile",

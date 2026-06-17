@@ -3,7 +3,7 @@ import logging
 
 import tiktoken
 from langchain_core.documents import Document
-from langchain_text_splitter import RecursiveCharacterTextSplitter
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 
 import config.settings as s
 

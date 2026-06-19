@@ -46,15 +46,25 @@ def build_chroma_store(
     if embedder is None:
         embedder = get_embedder()
 
-    # Load existing store if available
-    if persist_dir.exists() and any(persist_dir.iterdir()) and not force_rebuild:
+    # Load existing store if available.
+    # Check specifically for chroma.sqlite3 — not just any file in the directory,
+    # because parent_document chunking writes parent_docstore.json here first and
+    # would otherwise fool this check into skipping the embed step.
+    chroma_db = persist_dir / "chroma.sqlite3"
+    if chroma_db.exists() and not force_rebuild:
         log.info("Loading existing Chroma store: %s", strategy_name)
         return Chroma(persist_directory=persist_dir_str, embedding_function=embedder)
 
-    # Build from scratch
+    # Build from scratch — delete only Chroma files, not companion files like
+    # parent_docstore.json which are written by the chunker before this runs.
     if persist_dir.exists() and force_rebuild:
         import shutil
-        shutil.rmtree(persist_dir)
+        chroma_suffixes = {".sqlite3", ".sqlite"}
+        for item in persist_dir.iterdir():
+            if item.is_dir():
+                shutil.rmtree(item)
+            elif item.suffix in chroma_suffixes:
+                item.unlink()
 
     persist_dir.mkdir(parents=True, exist_ok=True)
     log.info(

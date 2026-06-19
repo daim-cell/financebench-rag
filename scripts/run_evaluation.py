@@ -58,7 +58,11 @@ def build_pipeline(
 
     # ── Retriever ─────────────────────────────────────────────────────────────
     if retriever_type == "dense":
-        retriever = get_dense_retriever(strategy, k=k)
+        if strategy == "parent_document":
+            from src.retrieval.parent_retrievar import get_parent_document_retriever
+            retriever = get_parent_document_retriever(k=k)
+        else:
+            retriever = get_dense_retriever(strategy, k=k)
     elif retriever_type == "sparse":
         from src.retrieval.sparse import get_sparse_retriever
         retriever = get_sparse_retriever(strategy, k=k)

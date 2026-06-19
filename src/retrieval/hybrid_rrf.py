@@ -64,7 +64,11 @@ def get_hybrid_retriever(
         strategy_name: Chroma collection to load for the dense leg.
         k:             Final number of documents returned after fusion.
     """
-    dense = get_dense_retriever(strategy_name, k=s.TOP_K_DENSE)
+    if strategy_name == "parent_document":
+        from src.retrieval.parent_retrievar import get_parent_document_retriever
+        dense = get_parent_document_retriever(k=s.TOP_K_DENSE)
+    else:
+        dense = get_dense_retriever(strategy_name, k=s.TOP_K_DENSE)
     sparse = get_sparse_retriever(strategy_name, k=s.TOP_K_DENSE)
     log.info("hybrid_rrf: built retriever for '%s', k=%d", strategy_name, k)
     return HybridRRFRetriever(

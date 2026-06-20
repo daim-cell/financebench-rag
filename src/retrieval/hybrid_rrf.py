@@ -30,21 +30,27 @@ class HybridRRFRetriever(BaseRetriever):
         dense_docs = self.dense_retriever.invoke(query)
         sparse_docs = self.sparse_retriever.invoke(query)
 
-        # Map chunk_id → Document (first seen wins)
-        doc_by_id: dict[str, Document] = {}
-        rrf_scores: dict[str, float] = defaultdict(float)
+        # Deduplicate by (doc_name, page_num) rather than chunk_id because the
+        # dense and sparse legs use different chunk granularities (parent chunks
+        # vs page-level docs) and can return the same page with different IDs.
+        # The dense doc wins on tie since it's processed first.
+        doc_by_page: dict[tuple, Document] = {}
+        rrf_scores: dict[tuple, float] = defaultdict(float)
 
         for ranked_list in (dense_docs, sparse_docs):
             for rank, doc in enumerate(ranked_list):
-                cid = doc.metadata.get("chunk_id") or f"__no_id_{id(doc)}"
-                if cid not in doc_by_id:
-                    doc_by_id[cid] = doc
-                rrf_scores[cid] += 1.0 / (self.rrf_k + rank + 1)
+                page_key = (
+                    doc.metadata.get("doc_name", ""),
+                    doc.metadata.get("page_num", -1),
+                )
+                if page_key not in doc_by_page:
+                    doc_by_page[page_key] = doc
+                rrf_scores[page_key] += 1.0 / (self.rrf_k + rank + 1)
 
-        fused = sorted(doc_by_id.keys(), key=lambda cid: rrf_scores[cid], reverse=True)
-        results = [doc_by_id[cid] for cid in fused[: self.k]]
+        fused = sorted(doc_by_page.keys(), key=lambda pk: rrf_scores[pk], reverse=True)
+        results = [doc_by_page[pk] for pk in fused[: self.k]]
         log.debug(
-            "hybrid_rrf: dense=%d sparse=%d → fused=%d (top %d)",
+            "hybrid_rrf: dense=%d sparse=%d → unique_pages=%d (top %d)",
             len(dense_docs), len(sparse_docs), len(fused), self.k,
         )
         return results
@@ -64,12 +70,16 @@ def get_hybrid_retriever(
         strategy_name: Chroma collection to load for the dense leg.
         k:             Final number of documents returned after fusion.
     """
+    from src.chunking import get_chunks_for_strategy
+
     if strategy_name == "parent_document":
         from src.retrieval.parent_retrievar import get_parent_document_retriever
         dense = get_parent_document_retriever(k=s.TOP_K_DENSE)
     else:
         dense = get_dense_retriever(strategy_name, k=s.TOP_K_DENSE)
-    sparse = get_sparse_retriever(strategy_name, k=s.TOP_K_DENSE)
+
+    chunks = get_chunks_for_strategy(strategy_name)
+    sparse = get_sparse_retriever(chunks, k=s.TOP_K_DENSE)
     log.info("hybrid_rrf: built retriever for '%s', k=%d", strategy_name, k)
     return HybridRRFRetriever(
         dense_retriever=dense,

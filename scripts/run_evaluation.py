@@ -56,19 +56,22 @@ def build_pipeline(
 
     llm = OllamaLLM(model=s.OLLAMA_MODEL)
 
-    # ── Retriever ─────────────────────────────────────────────────────────────
+    # ── Retriever — always fetch TOP_K_DENSE candidates ──────────────────────
+    # k (= TOP_K_FINAL) only controls how many docs the LLM sees; the retriever
+    # always returns TOP_K_DENSE so hit_rate_at_10 is meaningful.
     if retriever_type == "dense":
         if strategy == "parent_document":
             from src.retrieval.parent_retrievar import get_parent_document_retriever
-            retriever = get_parent_document_retriever(k=k)
+            retriever = get_parent_document_retriever(k=s.TOP_K_DENSE)
         else:
-            retriever = get_dense_retriever(strategy, k=k)
+            retriever = get_dense_retriever(strategy, k=s.TOP_K_DENSE)
     elif retriever_type == "sparse":
+        from src.chunking import get_chunks_for_strategy
         from src.retrieval.sparse import get_sparse_retriever
-        retriever = get_sparse_retriever(strategy, k=k)
+        retriever = get_sparse_retriever(get_chunks_for_strategy(strategy), k=s.TOP_K_DENSE)
     elif retriever_type == "hybrid_rrf":
         from src.retrieval.hybrid_rrf import get_hybrid_retriever
-        retriever = get_hybrid_retriever(strategy, k=k)
+        retriever = get_hybrid_retriever(strategy, k=s.TOP_K_DENSE)
     else:
         raise ValueError(f"Unknown retriever: {retriever_type}")
 
@@ -90,19 +93,20 @@ def build_pipeline(
         reranker = rerank
 
     def pipeline_fn(question: str) -> tuple[str, list[Document]]:
-        # Retrieve
+        # Retrieve TOP_K_DENSE candidates
         if hasattr(retriever, "get_relevant_documents"):
             docs = retriever.get_relevant_documents(question)
         else:
             docs = retriever.invoke(question)
 
-        # Rerank and trim to TOP_K_FINAL
+        # Rerank if requested (scores all candidates, trims to TOP_K_DENSE)
         if reranker:
-            docs = reranker(question, docs)[: s.TOP_K_FINAL]
-        else:
-            docs = docs[: k]
+            docs = reranker(question, docs)
 
-        context = "\n\n".join(d.page_content for d in docs)
+        # LLM only sees the top k docs; harness receives the full list so that
+        # hit_rate_at_5 and hit_rate_at_10 are computed over 20 candidates.
+        llm_docs = docs[:k]
+        context = "\n\n".join(d.page_content for d in llm_docs)
         answer = llm.invoke(_PROMPT.format(question=question, context=context))
         return answer, docs
 

@@ -30,9 +30,11 @@ PARENT_CHUNK = 2048
 SEMANTIC_THRESHOLD = 95
 
 # Retrieval
-TOP_K_DENSE = 20
-TOP_K_FINAL = 5
-RRF_K = 60
+TOP_K_DENSE       = 20
+TOP_K_FINAL       = 5
+RRF_K             = 60
+RRF_DENSE_WEIGHT  = 5.0  # dense leg outweighs sparse in hybrid RRF fusion
+RRF_SPARSE_WEIGHT = 1.0
 
 # Evaluation
 EVAL_PAIRS_PATH = EVAL_DIR / "qa_pairs_30.json"

@@ -31,7 +31,8 @@ class SparseBM25Retriever(BaseRetriever):
     def __init__(self, bm25: BM25Retriever, k: int = s.TOP_K_DENSE, **data):
         super().__init__(bm25_k=k, **data)
         object.__setattr__(self, "_bm25", bm25)
-        self._bm25.k = k
+        # Over-fetch by 3× so dedup leaves enough unique pages after filtering.
+        self._bm25.k = k * 3
 
     def _get_relevant_documents(
         self,
@@ -39,7 +40,21 @@ class SparseBM25Retriever(BaseRetriever):
         *,
         run_manager: CallbackManagerForRetrieverRun | None = None,
     ) -> list[Document]:
-        return self._bm25.invoke(query)
+        raw = self._bm25.invoke(query)
+
+        # Deduplicate by (doc_name, page_num): multiple chunks from the same
+        # page all have the same page_num — keeping duplicates wastes top-k slots.
+        seen: set[tuple] = set()
+        unique: list[Document] = []
+        for doc in raw:
+            page_key = (doc.metadata.get("doc_name", ""), doc.metadata.get("page_num", -1))
+            if page_key not in seen:
+                seen.add(page_key)
+                unique.append(doc)
+            if len(unique) == self.bm25_k:
+                break
+
+        return unique
 
 
 def get_sparse_retriever(

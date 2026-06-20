@@ -117,6 +117,7 @@ def evaluate(
     ctx_faith_list: list[float] = []
     scores: dict = {}
     num_processed: int = 0
+    _completed: bool = False
 
     try:
         for i, pair in enumerate(qa_pairs):
@@ -170,10 +171,12 @@ def evaluate(
         }
         _write_result_json(experiment_id, result_payload)
         _append_csv_row(experiment_id, metadata, scores, num_processed, timestamp)
+        _completed = True
         return scores
 
     finally:
-        if scores:
+        # Only write partial results when the run failed before completing normally.
+        if scores and not _completed:
             try:
                 _write_result_json(experiment_id, {
                     "experiment_id": experiment_id,

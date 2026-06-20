@@ -14,12 +14,19 @@ log = logging.getLogger(__name__)
 
 
 class HybridRRFRetriever(BaseRetriever):
-    """Fuse dense and sparse results via Reciprocal Rank Fusion."""
+    """Fuse dense and sparse results via weighted Reciprocal Rank Fusion.
+
+    The dense leg carries RRF_DENSE_WEIGHT times the contribution of the sparse
+    leg so that keyword hits cannot displace semantically-ranked results unless
+    they appear at a substantially better rank.
+    """
 
     dense_retriever: BaseRetriever = Field(...)
     sparse_retriever: BaseRetriever = Field(...)
     k: int = Field(default=s.TOP_K_DENSE)
     rrf_k: int = Field(default=s.RRF_K)
+    dense_weight: float = Field(default=s.RRF_DENSE_WEIGHT)
+    sparse_weight: float = Field(default=s.RRF_SPARSE_WEIGHT)
 
     def _get_relevant_documents(
         self,
@@ -37,7 +44,10 @@ class HybridRRFRetriever(BaseRetriever):
         doc_by_page: dict[tuple, Document] = {}
         rrf_scores: dict[tuple, float] = defaultdict(float)
 
-        for ranked_list in (dense_docs, sparse_docs):
+        for ranked_list, weight in (
+            (dense_docs, self.dense_weight),
+            (sparse_docs, self.sparse_weight),
+        ):
             for rank, doc in enumerate(ranked_list):
                 page_key = (
                     doc.metadata.get("doc_name", ""),
@@ -45,7 +55,7 @@ class HybridRRFRetriever(BaseRetriever):
                 )
                 if page_key not in doc_by_page:
                     doc_by_page[page_key] = doc
-                rrf_scores[page_key] += 1.0 / (self.rrf_k + rank + 1)
+                rrf_scores[page_key] += weight / (self.rrf_k + rank + 1)
 
         fused = sorted(doc_by_page.keys(), key=lambda pk: rrf_scores[pk], reverse=True)
         results = [doc_by_page[pk] for pk in fused[: self.k]]
@@ -86,4 +96,6 @@ def get_hybrid_retriever(
         sparse_retriever=sparse,
         k=k,
         rrf_k=s.RRF_K,
+        dense_weight=s.RRF_DENSE_WEIGHT,
+        sparse_weight=s.RRF_SPARSE_WEIGHT,
     )

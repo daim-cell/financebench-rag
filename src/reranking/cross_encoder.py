@@ -1,11 +1,3 @@
-"""Cross-encoder reranking using a sentence-transformers CrossEncoder model.
-
-The cross-encoder scores each (query, passage) pair jointly, producing a
-relevance score that is more accurate than the dot-product used in dense
-retrieval. It is applied after the initial retrieval step to re-order the
-candidate pool before passing the top-k documents to the LLM.
-"""
-
 import logging
 
 from langchain_core.documents import Document

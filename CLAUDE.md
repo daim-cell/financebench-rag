@@ -2,9 +2,12 @@
 
 ## What this project is
 
-A RAG benchmarking system built on the FinanceBench dataset. It evaluates and compares the performance impact of four pipeline axes — chunking strategy, retrieval method, query transformation, and cross-encoder reranking — and produces a fully populated `eval/comparison_table.csv` scoring every combination on answer correctness, faithfulness, retrieval hit-rate, and NDCG@5.
+A RAG benchmarking and agentic QA system built on the FinanceBench dataset. It has two layers:
 
-The corpus is 83 SEC filings (10-K, 10-Q, 8-K, earnings reports) with 150 expert-written Q&A pairs. A 30-pair stratified subset lives at `eval/qa_pairs_30.json` and is the locked evaluation ground truth — **never modify it after creation**.
+- **Evaluation layer** — benchmarks four pipeline axes (chunking strategy, retrieval method, query transformation, cross-encoder reranking) and records every combination in `eval/comparison_table.csv`.
+- **Production layer** — a LangGraph `StateGraph` implementing CRAG, Self-RAG reflection, adaptive routing, persistent memory, and human-in-the-loop streaming over the same FinanceBench corpus.
+
+The corpus is 83 SEC filings (10-K, 10-Q, 8-K, earnings reports) with 150 expert-written Q&A pairs. A 30-pair stratified subset lives at `eval/qa_pairs_30.json` — never modify it after creation.
 
 ---
 
@@ -13,7 +16,7 @@ The corpus is 83 SEC filings (10-K, 10-Q, 8-K, earnings reports) with 150 expert
 - Always pass `device="mps"` to every `SentenceTransformer()` and `CrossEncoder()` call
 - Install and import `faiss-cpu` only — `faiss-gpu` has no Metal support, never use it
 - Set `PYTORCH_ENABLE_MPS_FALLBACK=1` in the environment if MPS throws an unsupported-op error — do not change the device to cpu in code
-
+- Ollama uses Metal automatically; it must be running (`ollama serve`) before any LLM, graph, or RAGAS call
 
 ---
 
@@ -21,9 +24,12 @@ The corpus is 83 SEC filings (10-K, 10-Q, 8-K, earnings reports) with 150 expert
 
 | Role | Library | Key detail |
 |---|---|---|
-| LLM | `langchain-ollama` `OllamaLLM` | Model name comes from `settings.OLLAMA_MODEL` |
+| LLM | `langchain-ollama` `OllamaLLM` | Model name from `settings.OLLAMA_MODEL` |
 | Embedder | `sentence-transformers` | Always `device=settings.DEVICE` |
-| Vector store | `chromadb` + `langchain-chroma` | Primary store; `faiss-cpu` used only for recall benchmarks |
+| Agentic graph | `langgraph` `StateGraph` | CRAG loop, Self-RAG, router, memory |
+| Short-term memory | `langgraph` `MemorySaver` | Thread-level checkpointer |
+| Web search fallback | `tavily-python` | Fires when all docs grade irrelevant |
+| Vector store | `chromadb` + `langchain-chroma` | Primary store; `faiss-cpu` for recall benchmarks only |
 | Sparse search | `rank-bm25` via `BM25Retriever` | In-memory, rebuilt each run — never persisted |
 | Reranker | `sentence-transformers` `CrossEncoder` | Model from `settings.RERANK_MODEL` |
 | Framework | `langchain` 0.3+ / `langchain-community` | |
@@ -33,11 +39,11 @@ The corpus is 83 SEC filings (10-K, 10-Q, 8-K, earnings reports) with 150 expert
 
 ## Configuration
 
-**All constants live in `config/settings.py`. Never hardcode any of these in module files.**
+All constants live in `config/settings.py`. Never hardcode any of these in module files.
 
 ```python
-# config/settings.py
 from pathlib import Path
+import os
 
 ROOT = Path(__file__).parent.parent
 
@@ -48,146 +54,159 @@ PROCESSED_DIR   = DATA_DIR / "processed"
 VECTORSTORE_DIR = ROOT / "vectorstores"
 EVAL_DIR        = ROOT / "eval"
 RESULTS_DIR     = EVAL_DIR / "results"
+MEMORY_DIR      = ROOT / "memory"
 
 # Models
-OLLAMA_MODEL  = "llama3.2:3b"          # swap to "llama3.1:8b" on 16 GB
-EMBED_MODEL   = "BAAI/bge-small-en-v1.5"  # swap to "nomic-embed-text-v1.5" on 16 GB
+OLLAMA_MODEL  = "llama3.2:3b"
+EMBED_MODEL   = "BAAI/bge-small-en-v1.5"
 RERANK_MODEL  = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 DEVICE        = "mps"
 
 # Chunking
-CHUNK_SIZE    = 512
-CHUNK_OVERLAP = 64      
-CHILD_CHUNK   = 256      # stored chunk for parent-document retriever
-PARENT_CHUNK  = 2048     # returned chunk for parent-document retriever
-SEMANTIC_THRESHOLD = 95  # percentile breakpoint for SemanticChunker
+CHUNK_SIZE          = 512
+CHUNK_OVERLAP       = 51
+CHILD_CHUNK_SIZE    = 256
+PARENT_CHUNK_SIZE   = 2048
 
 # Retrieval
-TOP_K_DENSE   = 20       # candidate pool fed into reranker
-TOP_K_FINAL   = 5        # chunks actually sent to the LLM
-RRF_K         = 60       # RRF fusion constant
+TOP_K_DENSE   = 20
+TOP_K_FINAL   = 5
+RRF_K         = 60
+
+# Graph
+MAX_RETRIES        = 3     # Self-RAG and CRAG rewrite loop cap
+TAVILY_API_KEY     = os.getenv("TAVILY_API_KEY", "")
 
 # Evaluation
-EVAL_PAIRS_PATH    = EVAL_DIR / "qa_pairs_30.json"
-COMPARISON_TABLE   = EVAL_DIR / "comparison_table.csv"
+EVAL_PAIRS_PATH  = EVAL_DIR / "qa_pairs_30.json"
+COMPARISON_TABLE = EVAL_DIR / "comparison_table.csv"
+EVAL_SAMPLE_SIZE = 30
+RANDOM_SEED      = 42
+
+HF_DATASET_ID = "PatronusAI/financebench"
 ```
+
+---
+
+## Graph architecture — StateGraph
+
+The production pipeline is a LangGraph `StateGraph` defined in `src/graph/`. Every node receives the full `GraphState` and returns a partial dict of updated keys. Nodes never mutate state in place.
+
+### State schema
+
+```python
+class GraphState(TypedDict):
+    question:       str
+    generation:     str | None
+    documents:      list[Document]
+    graded_docs:    list[tuple[Document, str]]   # (doc, "relevant"|"ambiguous"|"irrelevant")
+    memory_context: str | None                   # injected from long-term store
+    rewrite_count:  int                          # loop guard for CRAG + Self-RAG
+    route:          Literal["vectorstore", "websearch", "direct"]
+```
+
+### Nodes
+
+**`router`** — classifies `state["question"]` as `vectorstore`, `websearch`, or `direct` via LLM prompt. Returns `{"route": ...}`. Wired with a conditional edge so the graph branches before any retrieval. Questions about the FinanceBench corpus → `vectorstore`; general financial queries with no corpus anchor → `websearch`; greetings or meta questions → `direct`.
+
+**`memory_inject`** — queries the long-term store for memories relevant to `state["question"]`, writes them to `state["memory_context"]`. Runs before `retrieve` so context is available to all downstream nodes.
+
+**`retrieve`** — runs the configured retriever (dense / sparse / hybrid_rrf) or Tavily depending on `state["route"]`. Returns `{"documents": [...]}`. Pre-retrieval transformers (HyDE, multi-query, step-back) are called from inside this node, not as separate nodes.
+
+**`grade_documents`** — passes each doc through an LLM grader that returns exactly `"relevant"`, `"ambiguous"`, or `"irrelevant"`. Parses defensively — any unexpected output becomes `"ambiguous"`, never raises. Returns `{"graded_docs": [...]}`. Conditional edge: if all docs are irrelevant and `rewrite_count < MAX_RETRIES` → `rewrite_query`; otherwise → `generate`.
+
+**`rewrite_query`** — rewrites `state["question"]` using the LLM, informed by `state["memory_context"]`. Increments `rewrite_count`. Routes back to `retrieve`. An interrupt is placed here for human-in-the-loop mode — execution pauses and yields state before the rewrite fires.
+
+**`generate`** — assembles context from relevant and ambiguous docs in `state["graded_docs"]`, injects `state["memory_context"]`, calls `OllamaLLM`, returns `{"generation": ...}`.
+
+**`self_rag_reflect`** — runs two checks on the generation:
+- `isGrounded`: does the answer stay within the retrieved context?
+- `isUseful`: does it actually address the original question?
+
+If either fails and `rewrite_count < MAX_RETRIES` → routes to `rewrite_query`. Otherwise accepts the generation. This cap must be checked before routing — never allow an unbounded loop.
+
+**`memory_write`** — after a successful generation, stores the (question, answer, docs) tuple in the long-term store. Runs as a terminal node after `self_rag_reflect` passes.
+
+**`debug_memory`** — optional inspection node that logs what was injected into each prompt. Only wired into the graph when `debug=True` is passed to invocation.
+
+### CRAG loop topology
+
+```
+router
+  ├─ vectorstore/websearch → memory_inject → retrieve → grade_documents
+  │                                               ↑           │
+  │                                               │    all irrelevant + retries left?
+  │                                               └── rewrite_query ◄── [INTERRUPT POINT]
+  │                                                           │
+  │                                              some relevant/ambiguous?
+  │                                                           ↓
+  └─ direct ─────────────────────────────────────────────► generate → self_rag_reflect
+                                                                            │
+                                                              not grounded/useful + retries left?
+                                                                            └── rewrite_query (loop)
+                                                                            │
+                                                              passed or retries exhausted?
+                                                                            ↓
+                                                                      memory_write → END
+```
+
+### Compiling the graph
+
+```python
+from langgraph.checkpoint.memory import MemorySaver
+
+graph = builder.compile(
+    checkpointer=MemorySaver(),
+    interrupt_before=["rewrite_query"],   # only active when HITL mode is on
+)
+```
+
+---
+
+## Memory management
+
+Two distinct stores — never conflate them.
+
+**Short-term (thread-level)**: `MemorySaver` passed to `compile()`. Persists the full `GraphState` across turns within the same `thread_id`. Automatic — no node-level code required. Access via `graph.get_state(config)`.
+
+**Long-term (cross-session)**: Implemented in `src/memory/long_term_store.py`. Keyed by semantic similarity to the incoming question. `memory_inject` queries it; `memory_write` updates it after successful generation. The two stores are never the same object. The long-term store is a separate persistence layer (e.g. a simple JSON/SQLite on disk keyed by embedding similarity), not a LangGraph primitive.
+
+**Memory-aware rewriting**: `rewrite_query` receives `state["memory_context"]` and must include it in the rewrite prompt — prior context may reveal a specific fiscal year, entity, or scope the user expects but didn't restate.
 
 ---
 
 ## Directory layout
 
 ```
-config/settings.py                  ← all constants; the only place magic numbers live
-data/
-  financebench_open_source.jsonl
-  financebench_document_information.jsonl
-  raw/pdfs/                         ← 83 PDFs (~500 MB, gitignored)
-  processed/{doc_name}.json         ← PyMuPDF page-by-page output (gitignored)
-eval/
-  qa_pairs_30.json                  ← locked eval ground truth
-  comparison_table.csv              ← one row appended per experiment
-  results/{experiment_id}.json      ← raw metric scores per run
-scripts/
-  download_pdfs.py                  ← idempotent: skips existing PDFs
-  extract_text.py                   ← idempotent: skips already-processed docs
-  run_experiment_grid.py            ← drives the full 24-combination grid
+config/settings.py
 src/
-  ingestion/
-    pdf_extractor.py
-  chunking/
-    fixed_size.py
-    recursive.py
-    semantic.py
-    parent_document.py
-  retrieval/
-    dense.py
-    sparse.py
-    hybrid_rrf.py
-  query_transform/
-    hyde.py
-    multi_query.py
-    step_back.py
-  reranking/
-    cross_encoder.py
+  ingestion/pdf_extractor.py
+  chunking/                        fixed_size, recursive, semantic, parent_document
+  retrieval/                       dense, sparse, hybrid_rrf, parent_document_retriever, chunk_cache
+  query_transform/                 hyde, multi_query, step_back   ← called from retrieve node
+  reranking/cross_encoder.py
+  graph/
+    state.py                       GraphState TypedDict
+    nodes.py                       all node functions
+    edges.py                       conditional edge logic
+    builder.py                     assembles and compiles the graph
+  memory/
+    long_term_store.py
   evaluation/
-    harness.py                      ← single entry point for scoring any pipeline
-    metrics.py                      ← hit_rate, ndcg_at_k
-  pipeline/
-    rag_pipeline.py                 ← composable builder used in the experiment grid
-vectorstores/                       ← Chroma collections (gitignored)
-  fixed_size/
-  recursive/
-  semantic/
-  parent_document/
+    harness.py
+    metrics.py
+scripts/
+  download_pdfs.py
+  extract_text.py
+  build_vectorstore.py
+  run_graph.py                     streaming graph entry point
+  run_experiment.py                single benchmarking run
+  run_experiment_grid.py           full comparison table
+eval/
+  qa_pairs_30.json                 locked — never overwrite
+  comparison_table.csv
+  results/
 ```
-
----
-
-## Data schemas
-
-### Processed document — `data/processed/{doc_name}.json`
-
-```json
-{
-  "doc_name": "AMCOR_2020_10K",
-  "pages": [
-    { "page_num": 1, "text": "..." },
-    { "page_num": 2, "text": "..." }
-  ]
-}
-```
-
-Use PyMuPDF (`import fitz`) for extraction, not pypdf. It handles mixed table/text layouts in SEC filings correctly.
-
-### `Document.metadata` — required on every chunk at every stage
-
-Chunkers create it. Retrievers must preserve it. Transformers must not strip it.
-
-```python
-{
-    "doc_name": str,   # e.g. "AMCOR_2020_10K"
-    "page_num": int,   # source page the text came from
-    "chunk_id": str,   # f"{doc_name}::p{page_num}::c{i}"
-}
-```
-
-### Eval pair — `eval/qa_pairs_30.json`
-
-```json
-{
-    "financebench_id": 42,
-    "question": "What is Amcor's year end FY2020 net AR in USD millions?",
-    "answer": "$1616.00",
-    "doc_name": "AMCOR_2020_10K",
-    "page_number": 49,
-    "evidence_text": "..."
-}
-```
-
-### Experiment result — `eval/results/{experiment_id}.json`
-
-```json
-{
-    "experiment_id": "recursive_hybrid_hyde_rerank",
-    "chunking_strategy": "recursive",
-    "retriever_type": "hybrid_rrf",
-    "query_transformer": "hyde",
-    "use_reranker": true,
-    "scores": {
-        "hit_rate_at_5": 0.73,
-        "hit_rate_at_10": 0.87,
-        "ndcg_at_5": 0.61,
-        "answer_correctness": 0.52,
-        "faithfulness": 0.78,
-        "context_recall": 0.69,
-        "context_precision": 0.55
-    },
-    "timestamp": "2025-01-15T10:30:00"
-}
-```
-
-`experiment_id` naming convention: `{chunking}_{retriever}_{transformer_or_none}_{rerank_or_base}`
-Examples: `fixed_dense_none_base`, `recursive_hybrid_hyde_rerank`
 
 ---
 
@@ -195,50 +214,23 @@ Examples: `fixed_dense_none_base`, `recursive_hybrid_hyde_rerank`
 
 ### Chunker signature
 
-All chunkers are module-level functions:
-
 ```python
-def chunk_documents(docs: list[dict]) -> list[Document]:
-    """
-    docs: list of dicts loaded from data/processed/*.json
-    Returns LangChain Documents with the required metadata schema.
-    """
+def chunk_documents(docs: list[dict]) -> list[Document]: ...
 ```
 
-Exception: `parent_document.py` returns `tuple[list[Document], list[Document]]` — `(child_docs, parent_docs)` — and manages its own Chroma collection internally.
+Exception: `parent_document.py` returns `tuple[list[Document], list[Document]]` — `(child_docs, parent_docs)`.
+
+`doc_name`, `page_num`, and `chunk_id` must be present in every returned Document's metadata.
 
 ### Retriever pattern
 
-All retrievers subclass `BaseRetriever` and implement `_get_relevant_documents(query: str, *, run_manager=None) -> list[Document]`. They must carry forward `doc_name`, `page_num`, and `chunk_id` in returned document metadata unchanged.
+All retrievers subclass `BaseRetriever` and implement `_get_relevant_documents(query, *, run_manager=None) -> list[Document]`. Must carry `doc_name`, `page_num`, `chunk_id` forward unchanged.
 
-`HybridRRFRetriever` constructor signature:
+### Grader contract
 
-```python
-def __init__(
-    self,
-    bm25_retriever: BM25Retriever,
-    dense_retriever: BaseRetriever,
-    k: int = settings.TOP_K_DENSE,
-)
-```
+LLM grader in `grade_documents` must return exactly one of `"relevant"`, `"ambiguous"`, `"irrelevant"` per document. Parse defensively — unexpected output → `"ambiguous"`, never raises, never crashes the node.
 
-RRF score per document: `sum(1 / (RRF_K + rank_i) for rank_i in ranks_across_retrievers)`.
-
-### Query transformer pattern
-
-Transformers wrap a retriever but are not BaseRetriever subclasses:
-
-```python
-class SomeTransformer:
-    def __init__(self, retriever: BaseRetriever, llm: BaseLLM) -> None: ...
-    def get_relevant_documents(self, query: str) -> list[Document]: ...
-```
-
-- **HyDE**: generate a hypothetical answer passage with the LLM, embed that passage, retrieve with the embedding
-- **Multi-query**: rewrite the query 3 ways via LLM, retrieve for each, union and deduplicate by `chunk_id`
-- **Step-back**: prompt the LLM for the broader financial concept behind the question, retrieve on the abstracted query, pass both original and abstracted contexts to the answer LLM
-
-### Harness contract — `src/evaluation/harness.py`
+### Harness contract
 
 ```python
 def evaluate(
@@ -246,64 +238,27 @@ def evaluate(
     qa_pairs: list[dict],
     experiment_id: str,
     metadata: dict,
-) -> dict:
-    """
-    pipeline_fn: receives a query string, returns (answer_str, retrieved_docs).
-    Writes eval/results/{experiment_id}.json BEFORE returning.
-    Appends a row to eval/comparison_table.csv BEFORE returning.
-    Never lets a run vanish silently — partial results are written on exception.
-    """
+) -> dict
 ```
 
-Initialise `LangchainLLMWrapper` and `LangchainEmbeddingsWrapper` once at module level, not per call.
-
-### RAGPipeline — `src/pipeline/rag_pipeline.py`
-
-```python
-class RAGPipeline:
-    def __init__(
-        self,
-        chunking_strategy: str,         # "fixed_size" | "recursive" | "semantic" | "parent_document"
-        retriever_type: str,            # "dense" | "sparse" | "hybrid_rrf"
-        query_transformer: str | None,  # "hyde" | "multi_query" | "step_back" | None
-        use_reranker: bool,
-        llm: BaseLLM,
-        embedder: Embeddings,
-    ) -> None: ...
-
-    def __call__(self, query: str) -> tuple[str, list[Document]]: ...
-```
-
-The experiment grid in `scripts/run_experiment_grid.py` loops over all 24 combinations, constructs a `RAGPipeline` per combination, and calls `harness.evaluate()` for each.
+Writes `eval/results/{experiment_id}.json` and appends to `eval/comparison_table.csv` before returning. Partial results written on exception via try/finally.
 
 ---
 
-## Evaluation metrics — `src/evaluation/metrics.py`
+## Coding rules
 
-```python
-def hit_rate(retrieved_docs: list[Document], gold_page_num: int) -> bool:
-    """True if gold_page_num appears in any doc.metadata["page_num"]."""
-
-def ndcg_at_k(retrieved_docs: list[Document], gold_page_num: int, k: int = 5) -> float:
-    """Binary relevance: 1 if page matches gold, 0 otherwise."""
-```
-
-RAGAS metrics used: `answer_correctness`, `faithfulness`, `context_recall`, `context_precision`.
-Feed `context_recall` and `context_precision` the raw `page_content` strings from retrieved docs as the context list.
-
----
-
-## Project-specific coding rules
-
-- **No hardcoded constants** — every path, model name, integer threshold, and k value is imported from `config.settings`
+- **No hardcoded constants** — every path, model name, threshold, k value from `config.settings`
 - **Logging not print** — `logging.getLogger(__name__)` at module level in every file
-- **Metadata contract is sacred** — `doc_name`, `page_num`, `chunk_id` must survive every transformation; downstream metrics break silently if they are stripped
-- **BM25 is not persisted** — rebuild `BM25Retriever` from the chunk text list on each run; do not serialise it
-- **Chroma always persisted** — pass `persist_directory=str(settings.VECTORSTORE_DIR / strategy_name)` to `Chroma`; never create in-memory-only collections for the main stores
-- **CrossEncoder input format** — always pass `[(query, doc.page_content), ...]` tuples to `model.predict()`; not bare strings
-- **Idempotent scripts** — `download_pdfs.py` and `extract_text.py` check for existing output before doing work; re-running them must be safe
-- **Results always written** — `harness.evaluate()` writes JSON and appends CSV before returning, even when scoring raises a partial exception; wrap with try/finally
-- **Type hints everywhere** — all public function signatures are fully annotated
+- **Nodes return dicts, never mutate** — every graph node returns a partial `GraphState` dict; never mutate the input state object
+- **Rewrite cap always checked** — before routing back to `retrieve`, verify `state["rewrite_count"] < settings.MAX_RETRIES`; no unbounded loops
+- **Grader parsing is defensive** — unknown grader output → `"ambiguous"`, never raises
+- **Metadata contract is sacred** — `doc_name`, `page_num`, `chunk_id` must survive every node; hit-rate metrics break silently if stripped
+- **BM25 is not persisted** — rebuild from chunk list each run
+- **Chroma always persisted** — pass `persist_directory=str(settings.VECTORSTORE_DIR / strategy_name)`
+- **CrossEncoder input format** — always `[(query, doc.page_content), ...]` tuples to `model.predict()`
+- **Long-term ≠ short-term memory** — `MemorySaver` is thread-scoped state; `long_term_store` is cross-session semantic memory; never pass one where the other is expected
+- **Results always written** — harness writes JSON and CSV before returning, even on partial exception
+- **Type hints everywhere** — all public function signatures fully annotated
 
 ---
 
@@ -313,37 +268,35 @@ Feed `context_recall` and `context_precision` the raw `page_content` strings fro
 # Setup
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-echo "PYTORCH_ENABLE_MPS_FALLBACK=1" >> .venv/bin/activate   # or add to shell profile
+echo "PYTORCH_ENABLE_MPS_FALLBACK=1" >> .venv/bin/activate
+export TAVILY_API_KEY=your_key_here   # required for websearch fallback
 
-# Ollama — must be running before any LLM or RAGAS call
+# Ollama — must be running before any LLM or graph call
 ollama serve &
-ollama pull llama3.2:3b   # or llama3.1:8b on 16 GB
+ollama pull llama3.2:3b
 
 # Data pipeline (both idempotent)
 python scripts/download_pdfs.py
 python scripts/extract_text.py
 
-# Build all four Chroma vector stores
-python -m src.chunking.fixed_size
-python -m src.chunking.recursive
-python -m src.chunking.semantic
-python -m src.chunking.parent_document
+# Build Chroma vector stores
+python scripts/build_vectorstore.py --strategy fixed_size
+python scripts/build_vectorstore.py --strategy recursive
+python scripts/build_vectorstore.py --strategy semantic
+python scripts/build_vectorstore.py --strategy parent_document
 
-# Evaluate a single pipeline configuration
-python -c "
-from src.pipeline.rag_pipeline import RAGPipeline
-from src.evaluation.harness import evaluate
-import json, config.settings as s
-from langchain_ollama import OllamaLLM
-from langchain_huggingface import HuggingFaceEmbeddings
+# Run agentic graph — streaming, single question
+python scripts/run_graph.py --question "What was Amcor's net AR in FY2020?" --thread-id session_1
 
-llm = OllamaLLM(model=s.OLLAMA_MODEL)
-emb = HuggingFaceEmbeddings(model_name=s.EMBED_MODEL, model_kwargs={'device': s.DEVICE})
-pipe = RAGPipeline('recursive', 'hybrid_rrf', 'hyde', True, llm, emb)
-qa  = json.loads(open(s.EVAL_PAIRS_PATH).read())
-print(evaluate(pipe, qa, 'recursive_hybrid_hyde_rerank', {}))
-"
+# Run with human-in-the-loop (pauses before rewrite_query for approval)
+python scripts/run_graph.py --question "..." --thread-id session_1 --hitl
 
-# Run the full 24-combination experiment grid
+# Run with memory debug inspection
+python scripts/run_graph.py --question "..." --thread-id session_1 --debug
+
+# Benchmarking — single experiment
+python scripts/run_experiment.py --strategy recursive --retriever dense --transformer step_back --reranker
+
+# Benchmarking — full comparison grid
 python scripts/run_experiment_grid.py
 ```

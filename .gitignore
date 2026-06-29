@@ -17,6 +17,8 @@ data/raw/pdfs/*
 data/processed/*
 !data/processed/.gitkeep
 vectorstores/
+memory/*
+!memory/.gitkeep
 eval/results/*
 !eval/results/.gitkeep
 eval/comparison_table.csv

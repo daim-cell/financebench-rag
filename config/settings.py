@@ -15,6 +15,7 @@ PROCESSED_DIR = DATA_DIR / "processed"
 VECTORSTORE_DIR = ROOT / "vectorstores"
 EVAL_DIR = ROOT / "eval"
 RESULTS_DIR = EVAL_DIR / "results"
+MEMORY_DIR = ROOT / "memory"
 
 # Models
 OLLAMA_MODEL = "llama3.2:3b"
@@ -42,6 +43,10 @@ COMPARISON_TABLE = EVAL_DIR / "comparison_table.csv"
 EVAL_SAMPLE_SIZE = 30
 RANDOM_SEED      = 42
 SIMILARITY_THRESHOLD = 0.7   # answer_accuracy = 1 if answer_similarity >= this
- 
+
+# Graph
+MAX_RETRIES = 3
+TAVILY_API_KEY = ""
+
 # Dataset
 HF_DATASET_ID = "PatronusAI/financebench"

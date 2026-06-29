@@ -33,7 +33,6 @@ The corpus is 83 SEC filings (10-K, 10-Q, 8-K, earnings reports) with 150 expert
 | Sparse search | `rank-bm25` via `BM25Retriever` | In-memory, rebuilt each run — never persisted |
 | Reranker | `sentence-transformers` `CrossEncoder` | Model from `settings.RERANK_MODEL` |
 | Framework | `langchain` 0.3+ / `langchain-community` | |
-| Evaluation | `ragas` 0.2+ | Wrapped around Ollama via `LangchainLLMWrapper` |
 
 ---
 
@@ -199,7 +198,7 @@ scripts/
   download_pdfs.py
   extract_text.py
   build_vectorstore.py
-  run_graph.py                     streaming graph entry point
+  app.py                     router for streaming results
   run_experiment.py                single benchmarking run
   run_experiment_grid.py           full comparison table
 eval/
@@ -285,14 +284,39 @@ python scripts/build_vectorstore.py --strategy recursive
 python scripts/build_vectorstore.py --strategy semantic
 python scripts/build_vectorstore.py --strategy parent_document
 
-# Run agentic graph — streaming, single question
-python scripts/run_graph.py --question "What was Amcor's net AR in FY2020?" --thread-id session_1
+# 1. Start a conversation — stream until interrupt or completion
+curl -N -X POST http://localhost:8000/chat \
+  -H "Content-Type: application/json" \
+  -d '{"question": "What was Amcor net AR in FY2020?"}' \
+  -D - 2>/dev/null | grep -E "X-Thread-Id:|data:"
 
-# Run with human-in-the-loop (pauses before rewrite_query for approval)
-python scripts/run_graph.py --question "..." --thread-id session_1 --hitl
+# You'll see:
+# X-Thread-Id: abc-123-...
+# data: {"event": "node", "node": "router", "route": "vectorstore"}
+# data: {"event": "node", "node": "retrieve", "docs_retrieved": 5}
+# data: {"event": "node", "node": "grade", "grades": {"irrelevant": 5}}
+# data: {"event": "interrupted", "original_question": "...", "rewrite_count": 0}
+# data: {"event": "stream_end"}
 
-# Run with memory debug inspection
-python scripts/run_graph.py --question "..." --thread-id session_1 --debug
+THREAD_ID="abc-123-..."
+
+# 2a. Approve — let LLM rewrite the query
+curl -N -X POST http://localhost:8000/thread/$THREAD_ID/resume \
+  -H "Content-Type: application/json" \
+  -d '{"action": "approve"}'
+
+# 2b. Or modify — provide your own rewrite
+curl -N -X POST http://localhost:8000/thread/$THREAD_ID/resume \
+  -H "Content-Type: application/json" \
+  -d '{"action": "modify", "modified_question": "What are Amcors accounts receivable FY2020 balance sheet?"}'
+
+# 2c. Or reject — stop here
+curl -N -X POST http://localhost:8000/thread/$THREAD_ID/resume \
+  -H "Content-Type: application/json" \
+  -d '{"action": "reject"}'
+
+# 3. Check thread status without streaming
+curl http://localhost:8000/thread/$THREAD_ID
 
 # Benchmarking — single experiment
 python scripts/run_experiment.py --strategy recursive --retriever dense --transformer step_back --reranker
